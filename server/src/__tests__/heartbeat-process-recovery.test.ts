@@ -951,6 +951,80 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(wakeup?.status).toBe("claimed");
   });
 
+  it("does not reap a pre-spawn run active in another heartbeat service instance", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    let resolveAdapter: (() => void) | null = null;
+    const adapterStarted = new Promise<void>((resolveStarted) => {
+      mockAdapterExecute.mockImplementationOnce(async () => {
+        resolveStarted();
+        await new Promise<void>((resolve) => {
+          resolveAdapter = resolve;
+        });
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          errorMessage: null,
+          summary: "Completed after cross-instance reaper scan.",
+          provider: "test",
+          model: "test-model",
+        };
+      });
+    });
+
+    const executorHeartbeat = heartbeatService(db);
+    const reaperHeartbeat = heartbeatService(db);
+    const run = await executorHeartbeat.invoke(agentId, "on_demand", {}, "manual");
+    expect(run).not.toBeNull();
+
+    await adapterStarted;
+
+    const old = new Date("2026-03-19T00:00:00.000Z");
+    await db
+      .update(heartbeatRuns)
+      .set({
+        startedAt: old,
+        updatedAt: old,
+        processPid: null,
+        processGroupId: null,
+        processStartedAt: null,
+      })
+      .where(eq(heartbeatRuns.id, run!.id));
+
+    const result = await reaperHeartbeat.reapOrphanedRuns();
+    expect(result.reaped).toBe(0);
+
+    const stillRunning = await reaperHeartbeat.getRun(run!.id);
+    expect(stillRunning?.status).toBe("running");
+    expect(stillRunning?.errorCode).toBeNull();
+
+    resolveAdapter?.();
+    const finished = await waitForRunToSettle(executorHeartbeat, run!.id);
+    expect(finished?.status).toBe("succeeded");
+  });
+
   it("queues exactly one retry when the recorded local pid is dead", async () => {
     const { agentId, runId, issueId } = await seedRunFixture({
       processPid: 999_999_999,

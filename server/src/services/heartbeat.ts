@@ -209,6 +209,10 @@ const MAX_INLINE_WAKE_COMMENT_BODY_CHARS = 4_000;
 const MAX_INLINE_WAKE_COMMENT_BODY_TOTAL_CHARS = 12_000;
 const execFile = promisify(execFileCallback);
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
+// Shared across heartbeatService instances. Routes, routines, and the scheduler
+// each construct this service; a per-instance set lets the scheduler reaper miss
+// runs that another instance is actively preparing before the adapter has spawned.
+const activeRunExecutions = new Set<string>();
 const CANCELLABLE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const HEARTBEAT_RUN_TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"] as const;
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["failed", "cancelled", "timed_out"] as const;
@@ -235,6 +239,7 @@ const MAX_TURN_CONTINUATION_MAX_ATTEMPTS_CAP = 10;
 const MAX_TURN_CONTINUATION_DEFAULT_DELAY_MS = 1_000;
 const MAX_TURN_CONTINUATION_MAX_DELAY_MS = 5 * 60 * 1000;
 const MAX_TURN_CONTINUATION_LIVE_RUN_STATUSES = ["scheduled_retry", "queued", "running"] as const;
+const PRE_SPAWN_DISPATCH_GRACE_MS = 30 * 60 * 1000;
 type CodexTransientFallbackMode =
   | "same_session"
   | "safer_invocation"
@@ -2526,7 +2531,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     environmentRuntime,
   });
   const workspaceOperationsSvc = workspaceOperationService(db);
-  const activeRunExecutions = new Set<string>();
   const budgetHooks = {
     cancelWorkForScope: cancelBudgetScopeWork,
   };
@@ -4559,7 +4563,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         processStartedAt: Number.isNaN(startedAt.getTime()) ? new Date() : startedAt,
         updatedAt: new Date(),
       })
-      .where(eq(heartbeatRuns.id, runId))
+      .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.status, "running")))
       .returning()
       .then((rows) => rows[0] ?? null);
   }
@@ -6726,6 +6730,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const tracksLocalChild = isTrackedLocalChildProcessAdapter(adapterType);
       const processPidAlive = tracksLocalChild && run.processPid && isProcessAlive(run.processPid);
       const processGroupAlive = tracksLocalChild && run.processGroupId && isProcessGroupAlive(run.processGroupId);
+      const hasProcessMetadata = Boolean(run.processPid || run.processGroupId || run.processStartedAt);
+      if (tracksLocalChild && !hasProcessMetadata) {
+        const dispatchRefTime = run.startedAt ?? run.updatedAt ?? run.createdAt ?? null;
+        const dispatchAgeMs = dispatchRefTime ? now.getTime() - new Date(dispatchRefTime).getTime() : Number.POSITIVE_INFINITY;
+        if (dispatchAgeMs < PRE_SPAWN_DISPATCH_GRACE_MS) {
+          continue;
+        }
+      }
       if (processPidAlive) {
         if (run.errorCode !== DETACHED_PROCESS_ERROR_CODE) {
           const detachedMessage = `Lost in-memory process handle, but child pid ${run.processPid} is still alive`;
