@@ -926,7 +926,11 @@ const heartbeatRunIssueSummaryColumns = {
   finishedAt: heartbeatRuns.finishedAt,
   createdAt: heartbeatRuns.createdAt,
   agentId: heartbeatRuns.agentId,
+  logStore: heartbeatRuns.logStore,
+  logRef: heartbeatRuns.logRef,
   logBytes: heartbeatRuns.logBytes,
+  processPid: heartbeatRuns.processPid,
+  processGroupId: heartbeatRunProcessGroupIdColumn,
   processStartedAt: heartbeatRuns.processStartedAt,
   livenessState: heartbeatRuns.livenessState,
   livenessReason: heartbeatRuns.livenessReason,
@@ -4602,8 +4606,63 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .then((rows) => rows[0] ?? null);
   }
 
-  async function findRunIssueComment(runId: string, companyId: string, issueId: string) {
-    return db
+  function toPolicyTimestampMs(value: Date | string | null | undefined) {
+    if (!value) return null;
+    const date = value instanceof Date ? value : new Date(value);
+    const timestamp = date.getTime();
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+
+  async function readRunLogTextForIssueCommentPolicy(run: Pick<
+    typeof heartbeatRuns.$inferSelect,
+    "id" | "logStore" | "logRef" | "logBytes"
+  >) {
+    if (run.logStore !== "local_file" || !run.logRef) return "";
+    const logBytes = Number(run.logBytes ?? 0);
+    if (!Number.isFinite(logBytes) || logBytes <= 0) return "";
+
+    const store = getRunLogStore();
+    let offset = 0;
+    let content = "";
+    let nextOffset: number | undefined = 0;
+    const maxBytes = 2_000_000;
+    const chunkBytes = 256_000;
+
+    try {
+      while (nextOffset !== undefined) {
+        const remainingBytes = maxBytes - Buffer.byteLength(content, "utf8");
+        if (remainingBytes <= 0) break;
+        const chunk = await store.read(
+          { store: "local_file", logRef: run.logRef },
+          {
+            offset,
+            limitBytes: Math.min(chunkBytes, remainingBytes),
+          },
+        );
+        content += chunk.content;
+        nextOffset = chunk.nextOffset;
+        offset = chunk.nextOffset ?? 0;
+      }
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 404) {
+        logger.warn(
+          { err, runId: run.id, logRef: run.logRef },
+          "missing heartbeat run log while satisfying issue comment policy",
+        );
+        return content;
+      }
+      throw err;
+    }
+
+    return content;
+  }
+
+  async function findRunIssueComment(
+    run: typeof heartbeatRuns.$inferSelect,
+    companyId: string,
+    issueId: string,
+  ) {
+    const directComment = await db
       .select({
         id: issueComments.id,
       })
@@ -4612,12 +4671,43 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         and(
           eq(issueComments.companyId, companyId),
           eq(issueComments.issueId, issueId),
-          eq(issueComments.createdByRunId, runId),
+          eq(issueComments.createdByRunId, run.id),
         ),
       )
       .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
       .limit(1)
       .then((rows) => rows[0] ?? null);
+    if (directComment) return directComment;
+
+    const logContent = await readRunLogTextForIssueCommentPolicy(run);
+    if (!logContent) return null;
+
+    const runStartMs = toPolicyTimestampMs(run.startedAt ?? run.createdAt);
+    const runEndMs = toPolicyTimestampMs(run.finishedAt ?? run.createdAt);
+    const endSlackMs = 60_000;
+
+    const candidates = await db
+      .select({
+        id: issueComments.id,
+        createdAt: issueComments.createdAt,
+      })
+      .from(issueComments)
+      .where(
+        and(
+          eq(issueComments.companyId, companyId),
+          eq(issueComments.issueId, issueId),
+          isNull(issueComments.createdByRunId),
+        ),
+      )
+      .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
+      .limit(100);
+
+    return candidates.find((comment) => {
+      if (!logContent.includes(`comment id: ${comment.id}`)) return false;
+      const commentCreatedAtMs = toPolicyTimestampMs(comment.createdAt);
+      if (commentCreatedAtMs === null || runStartMs === null || runEndMs === null) return true;
+      return commentCreatedAtMs >= runStartMs && commentCreatedAtMs <= runEndMs + endSlackMs;
+    }) ?? null;
   }
 
   async function refreshContinuationSummaryForRun(
@@ -4813,7 +4903,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return { outcome: "not_applicable" as const, queuedRun: null };
     }
 
-    const postedComment = await findRunIssueComment(run.id, run.companyId, issueId);
+    const postedComment = await findRunIssueComment(run, run.companyId, issueId);
     if (postedComment) {
       await patchRunIssueCommentStatus(run.id, {
         issueCommentStatus: "satisfied",
@@ -6163,6 +6253,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             // Mention/context runs can touch an issue, but only the current assignee
             // owns the issue execution lock shown as the active run.
             eq(issues.assigneeAgentId, claimed.agentId),
+            notInArray(issues.status, ["done", "cancelled"]),
             or(isNull(issues.executionRunId), eq(issues.executionRunId, claimed.id)),
           ),
         );
@@ -6878,7 +6969,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   async function buildRunOutputSilence(
     run: Pick<
       typeof heartbeatRuns.$inferSelect,
-      "id" | "companyId" | "status" | "lastOutputAt" | "lastOutputSeq" | "lastOutputStream" | "processStartedAt" | "startedAt" | "createdAt"
+      "id" | "companyId" | "status" | "lastOutputAt" | "lastOutputSeq" | "lastOutputStream" | "processStartedAt" | "startedAt" | "createdAt" | "processPid" | "processGroupId" | "logStore" | "logRef" | "logBytes"
     >,
     now = new Date(),
   ) {
@@ -8288,7 +8379,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const skipRunIssueComment = parseObject(livenessRun.contextSnapshot).skipIssueComment === true;
         if (issueId && outcome === "succeeded" && !skipRunIssueComment) {
           try {
-            const existingRunComment = await findRunIssueComment(livenessRun.id, livenessRun.companyId, issueId);
+            const existingRunComment = await findRunIssueComment(livenessRun, livenessRun.companyId, issueId);
             if (!existingRunComment) {
               const issueComment = buildHeartbeatRunIssueComment(persistedResultJson);
               if (issueComment) {

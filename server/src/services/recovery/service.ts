@@ -799,6 +799,23 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return startedAt ? Math.max(0, now.getTime() - startedAt.getTime()) : null;
   }
 
+  function hasActiveRunExecutionEvidence(run: Pick<
+    typeof heartbeatRuns.$inferSelect,
+    "id" | "processStartedAt" | "processPid" | "processGroupId" | "lastOutputAt" | "lastOutputSeq" | "logStore" | "logRef" | "logBytes"
+  >) {
+    return Boolean(
+      runningProcesses.has(run.id) ||
+      run.processStartedAt ||
+      run.processPid ||
+      run.processGroupId ||
+      run.lastOutputAt ||
+      (run.lastOutputSeq ?? 0) > 0 ||
+      run.logStore ||
+      run.logRef ||
+      (run.logBytes ?? 0) > 0
+    );
+  }
+
   async function latestActiveOutputQuietUntilDecision(companyId: string, runId: string, now = new Date()) {
     const [row] = await db
       .select()
@@ -843,7 +860,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   async function buildRunOutputSilence(
     run: Pick<
       typeof heartbeatRuns.$inferSelect,
-      "id" | "companyId" | "status" | "lastOutputAt" | "lastOutputSeq" | "lastOutputStream" | "processStartedAt" | "startedAt" | "createdAt"
+      "id" | "companyId" | "status" | "lastOutputAt" | "lastOutputSeq" | "lastOutputStream" | "processStartedAt" | "startedAt" | "createdAt" | "processPid" | "processGroupId" | "logStore" | "logRef" | "logBytes"
     >,
     now = new Date(),
   ): Promise<RunOutputSilenceSummary> {
@@ -853,7 +870,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     ]);
     const silenceStartedAt = silenceStartedAtForRun(run);
     const silenceAgeMs = run.status === "running" ? silenceAgeMsForRun(run, now) : null;
-    const level = run.status !== "running"
+    const hasExecutionEvidence = hasActiveRunExecutionEvidence(run);
+    const level = run.status !== "running" || !hasExecutionEvidence
       ? "not_applicable"
       : quietUntilDecision
         ? "snoozed"
@@ -1451,6 +1469,27 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     if (!runningAgent || runningAgent.companyId !== input.run.companyId) return { kind: "skipped" as const };
     const sourceIssue = await resolveStaleRunSourceIssue(input.run);
     const existing = await findOpenStaleRunEvaluation(input.run.companyId, input.run.id);
+    if (!hasActiveRunExecutionEvidence(input.run)) {
+      await logActivity(db, {
+        companyId: input.run.companyId,
+        actorType: "system",
+        actorId: "system",
+        agentId: input.run.agentId,
+        runId: input.run.id,
+        action: "heartbeat.output_stale_non_executing_skipped",
+        entityType: "heartbeat_run",
+        entityId: input.run.id,
+        details: {
+          source: "recovery.scan_silent_active_runs",
+          sourceIssueId: sourceIssue?.id ?? null,
+          sourceIssueIdentifier: sourceIssue?.identifier ?? null,
+          invocationSource: input.run.invocationSource,
+          triggerDetail: input.run.triggerDetail,
+          existingEvaluationIssueId: existing?.id ?? null,
+        },
+      });
+      return { kind: "skipped" as const };
+    }
     if (sourceIssue && isRecoveryOriginIssue(sourceIssue)) {
       await logActivity(db, {
         companyId: input.run.companyId,

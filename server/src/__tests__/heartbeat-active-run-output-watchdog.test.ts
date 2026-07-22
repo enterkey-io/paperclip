@@ -96,7 +96,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
 
   afterAll(async () => {
     await tempDb?.cleanup();
-  });
+  }, 60_000);
 
   async function seedRunningRun(opts: {
     now: Date;
@@ -106,6 +106,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
     sourceStatus?: "in_progress" | "done" | "cancelled";
     sourceOriginKind?: string;
     sameRunTerminalEvidence?: "activity" | "comment";
+    executionEvidence?: boolean;
   }) {
     const companyId = randomUUID();
     const managerId = randomUUID();
@@ -172,7 +173,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
       invocationSource: "assignment",
       triggerDetail: "system",
       startedAt,
-      processStartedAt: startedAt,
+      processStartedAt: opts.executionEvidence === false ? null : startedAt,
       lastOutputAt,
       lastOutputSeq: opts.withOutput ? 3 : 0,
       lastOutputStream: opts.withOutput ? "stdout" : null,
@@ -260,6 +261,38 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
     });
     expect(evaluations[0]?.description).toContain("Decision Checklist");
     expect(evaluations[0]?.description).not.toContain("sk-test-secret-value");
+  });
+
+  it("skips metadata-only running rows without process, log, or output evidence", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000,
+      executionEvidence: false,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.scanSilentActiveRuns({ now, companyId });
+
+    expect(result).toMatchObject({ scanned: 1, created: 0, skipped: 1 });
+    expect(result.evaluationIssueIds).toHaveLength(0);
+
+    const evaluations = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "stale_active_run_evaluation")));
+    expect(evaluations).toHaveLength(0);
+    expect(evaluations.some((issue) => issue.title.startsWith("Review silent active run"))).toBe(false);
+
+    const [skipActivity] = await db
+      .select()
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.companyId, companyId),
+        eq(activityLog.runId, runId),
+        eq(activityLog.action, "heartbeat.output_stale_non_executing_skipped"),
+      ));
+    expect(skipActivity).toBeTruthy();
   });
 
   it("redacts sensitive values from actual run-log evidence", async () => {
@@ -598,6 +631,11 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
       processStartedAt: new Date(now.getTime() - ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS - 60_000),
       startedAt: new Date(now.getTime() - ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS - 60_000),
       createdAt: new Date(now.getTime() - ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS - 60_000),
+      processPid: null,
+      processGroupId: null,
+      logStore: null,
+      logRef: null,
+      logBytes: 0,
     }, now)).resolves.toMatchObject({
       level: "snoozed",
       snoozedUntil,
