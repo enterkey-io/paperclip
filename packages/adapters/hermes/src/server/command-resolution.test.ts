@@ -4,7 +4,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { expect, test } from "vitest";
 
 import { HERMES_CLI } from "../shared/constants.js";
-import { resolveHermesCommand } from "./execute.js";
+import { resolveHermesCommand, resolveHermesModelOverride } from "./execute.js";
 import { testEnvironment } from "./test.js";
 
 test("resolveHermesCommand prefers hermesCommand over command", () => {
@@ -15,6 +15,17 @@ test("resolveHermesCommand prefers hermesCommand over command", () => {
 test("resolveHermesCommand falls back to command before default hermes binary", () => {
   expect(resolveHermesCommand({ command: "hermes_maximus" })).toBe("hermes_maximus");
   expect(resolveHermesCommand({})).toBe(HERMES_CLI);
+});
+
+test("omits the model flag when Hermes should use its configured default", () => {
+  expect(resolveHermesModelOverride({})).toBeUndefined();
+  expect(resolveHermesModelOverride({ model: "auto" })).toBeUndefined();
+  expect(resolveHermesModelOverride({ model: "AUTO" })).toBeUndefined();
+});
+
+test("preserves an explicit Paperclip model override", () => {
+  expect(resolveHermesModelOverride({ model: "openai-codex/gpt-5.6-sol" }))
+    .toBe("openai-codex/gpt-5.6-sol");
 });
 
 test("testEnvironment accepts config.command when hermesCommand is absent", async () => {

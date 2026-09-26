@@ -370,6 +370,7 @@ export type ProjectSkillScanTarget = {
 
 type RuntimeSkillEntryOptions = {
   materializeMissing?: boolean;
+  skillKeys?: string[];
   versionSelections?: Map<string, string | null>;
 };
 
@@ -1108,10 +1109,24 @@ function readInlineSkillImports(companyId: string, files: Record<string, string>
   return imports;
 }
 
+const LOCAL_SKILL_IGNORED_DIRECTORY_NAMES = new Set([
+  ".git",
+  "node_modules",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".cache",
+  ".mypy_cache",
+  ".nox",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".tox",
+]);
+
 async function walkLocalFiles(root: string, current: string, out: string[]) {
   const entries = await fs.readdir(current, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.name === ".git" || entry.name === "node_modules") continue;
+    if (LOCAL_SKILL_IGNORED_DIRECTORY_NAMES.has(entry.name)) continue;
     const absolutePath = path.join(current, entry.name);
     if (entry.isDirectory()) {
       await walkLocalFiles(root, absolutePath, out);
@@ -5987,9 +6002,16 @@ export function companySkillService(db: Db) {
     options: RuntimeSkillEntryOptions = {},
   ): Promise<PaperclipSkillEntry[]> {
     const skills = await listFull(companyId);
+    const selectedKeys = options.skillKeys
+      ? new Set(options.skillKeys.flatMap((reference) => {
+        const resolved = resolveSkillReference(skills, reference).skill?.key ?? normalizeSkillKey(reference);
+        return resolved ? [resolved] : [];
+      }))
+      : null;
 
     const out: PaperclipSkillEntry[] = [];
     for (const skill of skills) {
+      if (selectedKeys && !selectedKeys.has(skill.key)) continue;
       const sourceResolution = await resolveRuntimeSkillSource(companyId, skill, options);
       if (!sourceResolution) continue;
 

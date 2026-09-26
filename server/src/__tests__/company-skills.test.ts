@@ -208,6 +208,37 @@ describe("project workspace skill discovery", () => {
     )).rejects.toThrow(/symbolic link/);
   });
 
+  it("excludes dependency and generated cache directories from local skill inventories", async () => {
+    const workspace = await makeTempDir("paperclip-skill-cache-exclusions-");
+    await writeSkillDir(workspace, "Cache-safe Skill");
+    await fs.mkdir(path.join(workspace, "references"), { recursive: true });
+    await fs.writeFile(path.join(workspace, "references", "guide.md"), "# Guide\n", "utf8");
+
+    const ignoredFiles = [
+      [".venv", "lib", "python", "site-packages", "dependency.py"],
+      ["venv", "lib", "python", "site-packages", "dependency.py"],
+      ["__pycache__", "module.cpython-313.pyc"],
+      ["node_modules", "dependency", "index.js"],
+      [".pytest_cache", "v", "cache", "nodeids"],
+    ];
+    for (const pathParts of ignoredFiles) {
+      const target = path.join(workspace, ...pathParts);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, "generated\n", "utf8");
+    }
+
+    const imported = await readLocalSkillImportFromDirectory(
+      "33333333-3333-4333-8333-333333333333",
+      workspace,
+      { inventoryMode: "full" },
+    );
+
+    expect(imported.fileInventory.map((entry) => entry.path)).toEqual([
+      "references/guide.md",
+      "SKILL.md",
+    ]);
+  });
+
   it("parses inline object array items in skill frontmatter metadata", async () => {
     const workspace = await makeTempDir("paperclip-inline-skill-yaml-");
     await fs.mkdir(workspace, { recursive: true });

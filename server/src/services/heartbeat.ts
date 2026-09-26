@@ -21335,6 +21335,7 @@ export function heartbeatService(
       const runtimeSkillEntries = await (async () => {
         try {
           return await companySkills.listRuntimeSkillEntries(agent.companyId, {
+            skillKeys: runtimeSkillPreference.desiredSkills,
             versionSelections: skillVersionSelectionMap(
               runtimeSkillPreference.desiredSkillEntries,
               {
