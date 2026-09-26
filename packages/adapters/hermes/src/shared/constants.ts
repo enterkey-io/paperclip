@@ -18,12 +18,10 @@ export const DEFAULT_TIMEOUT_SEC = 1800;
 export const DEFAULT_GRACE_SEC = 10;
 
 /**
- * Default model to use if none specified.
+ * Legacy UI sentinel for using Hermes's configured default model.
  *
- * Use "auto" so that Hermes resolves the model from the user's local
- * ~/.hermes/config.yaml — preventing the adapter from overriding a
- * user's configured default (e.g. MiniMax, OpenRouter, etc.) with a
- * hardcoded Anthropic model during Paperclip onboarding.
+ * The execution adapter must not pass this value through `-m`; omitting the
+ * flag is what lets Hermes resolve the active profile's configured default.
  */
 export const DEFAULT_MODEL = "auto";
 
