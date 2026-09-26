@@ -4270,13 +4270,79 @@ export async function ensurePaperclipSkillSymlink(
     .stat(resolvedLinkedPath)
     .then(() => true)
     .catch(() => false);
-  if (linkedPathExists) {
+  if (
+    linkedPathExists &&
+    !(await shareManagedCliInstallRoot(source, resolvedLinkedPath))
+  ) {
     return "skipped";
   }
 
-  await fs.unlink(target);
-  await linkSkill(source, target);
+  await replaceSkillSymlink(source, target, linkSkill);
   return "repaired";
+}
+
+async function shareManagedCliInstallRoot(
+  left: string,
+  right: string,
+): Promise<boolean> {
+  const [leftRoot, rightRoot] = await Promise.all([
+    resolveManagedCliInstallRoot(left),
+    resolveManagedCliInstallRoot(right),
+  ]);
+  return leftRoot !== null && leftRoot === rightRoot;
+}
+
+async function resolveManagedCliInstallRoot(
+  candidate: string,
+): Promise<string | null> {
+  let current = path.resolve(candidate);
+  while (true) {
+    if (path.basename(current) === "installs") {
+      const cliRoot = path.dirname(current);
+      const marker = path.join(cliRoot, ".managed-install");
+      const managed = await fs
+        .stat(marker)
+        .then((stats) => stats.isFile())
+        .catch(() => false);
+      if (path.basename(cliRoot) === "cli" && managed) return current;
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+async function replaceSkillSymlink(
+  source: string,
+  target: string,
+  linkSkill: (source: string, target: string) => Promise<void>,
+): Promise<void> {
+  const temporary = path.join(
+    path.dirname(target),
+    `.${path.basename(target)}.paperclip-${randomUUID()}.tmp`,
+  );
+  await linkSkill(source, temporary);
+  try {
+    await fs.rename(temporary, target);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (!new Set(["EEXIST", "ENOTEMPTY", "EPERM"]).has(code ?? "")) {
+      throw error;
+    }
+
+    const backup = `${temporary}.previous`;
+    await fs.rename(target, backup);
+    try {
+      await fs.rename(temporary, target);
+    } catch (replaceError) {
+      await fs.rename(backup, target).catch(() => {});
+      throw replaceError;
+    }
+    await fs.unlink(backup);
+  } finally {
+    await fs.unlink(temporary).catch(() => {});
+  }
 }
 
 async function hashSkillDirectory(root: string): Promise<string> {
