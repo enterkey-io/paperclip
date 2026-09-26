@@ -4295,7 +4295,7 @@ async function shareManagedCliInstallRoot(
 async function resolveManagedCliInstallRoot(
   candidate: string,
 ): Promise<string | null> {
-  let current = path.resolve(candidate);
+  let current = await fs.realpath(candidate).catch(() => path.resolve(candidate));
   while (true) {
     if (path.basename(current) === "installs") {
       const cliRoot = path.dirname(current);
