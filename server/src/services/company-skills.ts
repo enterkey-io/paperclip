@@ -1108,10 +1108,24 @@ function readInlineSkillImports(companyId: string, files: Record<string, string>
   return imports;
 }
 
+const LOCAL_SKILL_IGNORED_DIRECTORY_NAMES = new Set([
+  ".git",
+  "node_modules",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".cache",
+  ".mypy_cache",
+  ".nox",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".tox",
+]);
+
 async function walkLocalFiles(root: string, current: string, out: string[]) {
   const entries = await fs.readdir(current, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.name === ".git" || entry.name === "node_modules") continue;
+    if (LOCAL_SKILL_IGNORED_DIRECTORY_NAMES.has(entry.name)) continue;
     const absolutePath = path.join(current, entry.name);
     if (entry.isDirectory()) {
       await walkLocalFiles(root, absolutePath, out);
