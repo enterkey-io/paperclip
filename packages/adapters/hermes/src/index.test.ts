@@ -213,3 +213,73 @@ test("Hermes repoints a live skill symlink from a prior managed CLI install", as
     await fs.rm(home, { recursive: true, force: true });
   }
 });
+
+test("Hermes repoints a managed skill when the new source uses the current install link", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-hermes-current-upgrade-"));
+  try {
+    const cliRoot = path.join(home, ".paperclip", "cli");
+    const oldSource = path.join(
+      cliRoot,
+      "installs",
+      "npm",
+      "old",
+      "node_modules",
+      "@paperclipai",
+      "server",
+      "skills",
+      "paperclip",
+    );
+    const installedSource = path.join(
+      cliRoot,
+      "installs",
+      "git",
+      "new",
+      "node_modules",
+      "@paperclipai",
+      "server",
+      "skills",
+      "paperclip",
+    );
+    const source = path.join(
+      cliRoot,
+      "current",
+      "node_modules",
+      "@paperclipai",
+      "server",
+      "skills",
+      "paperclip",
+    );
+    const target = path.join(home, ".hermes", "skills", "paperclip");
+    await fs.mkdir(oldSource, { recursive: true });
+    await fs.mkdir(installedSource, { recursive: true });
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(path.join(cliRoot, ".managed-install"), "managed\n", "utf8");
+    await fs.writeFile(path.join(oldSource, "SKILL.md"), "# Old Paperclip\n", "utf8");
+    await fs.writeFile(path.join(installedSource, "SKILL.md"), "# New Paperclip\n", "utf8");
+    await fs.symlink(path.join("installs", "git", "new"), path.join(cliRoot, "current"));
+    await fs.symlink(oldSource, target);
+
+    const adapter = createServerAdapter();
+    await adapter.syncSkills?.({
+      adapterType: "hermes_local",
+      agentId: "11111111-1111-4111-8111-111111111111",
+      companyId: "22222222-2222-4222-8222-222222222222",
+      config: {
+        env: { HOME: home },
+        paperclipRuntimeSkills: [{
+          key: "paperclipai/paperclip/paperclip",
+          runtimeName: "paperclip",
+          source,
+        }],
+      },
+    }, []);
+
+    await expect(fs.readlink(target)).resolves.toBe(source);
+    await expect(fs.realpath(target)).resolves.toBe(installedSource);
+    await expect(fs.readFile(path.join(target, "SKILL.md"), "utf8")).resolves.toBe(
+      "# New Paperclip\n",
+    );
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
