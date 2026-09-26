@@ -370,6 +370,7 @@ export type ProjectSkillScanTarget = {
 
 type RuntimeSkillEntryOptions = {
   materializeMissing?: boolean;
+  skillKeys?: string[];
   versionSelections?: Map<string, string | null>;
 };
 
@@ -6001,9 +6002,16 @@ export function companySkillService(db: Db) {
     options: RuntimeSkillEntryOptions = {},
   ): Promise<PaperclipSkillEntry[]> {
     const skills = await listFull(companyId);
+    const selectedKeys = options.skillKeys
+      ? new Set(options.skillKeys.flatMap((reference) => {
+        const resolved = resolveSkillReference(skills, reference).skill?.key ?? normalizeSkillKey(reference);
+        return resolved ? [resolved] : [];
+      }))
+      : null;
 
     const out: PaperclipSkillEntry[] = [];
     for (const skill of skills) {
+      if (selectedKeys && !selectedKeys.has(skill.key)) continue;
       const sourceResolution = await resolveRuntimeSkillSource(companyId, skill, options);
       if (!sourceResolution) continue;
 

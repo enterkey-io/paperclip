@@ -2246,6 +2246,64 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     await expect(fs.stat(entry!.source)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("lists and materializes only explicitly selected runtime skills", async () => {
+    const companyId = randomUUID();
+    const selectedId = randomUUID();
+    const excludedId = randomUUID();
+    const selectedDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-selected-runtime-skill-"));
+    const excludedDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-excluded-runtime-skill-"));
+    cleanupDirs.add(selectedDir);
+    cleanupDirs.add(excludedDir);
+    await fs.writeFile(path.join(selectedDir, "SKILL.md"), "# Selected Skill\n", "utf8");
+    await fs.writeFile(path.join(excludedDir, "SKILL.md"), "# Excluded Skill\n", "utf8");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(companySkills).values([
+      {
+        id: selectedId,
+        companyId,
+        key: `company/${companyId}/selected-skill`,
+        slug: "selected-skill",
+        name: "Selected Skill",
+        markdown: "# Selected Skill\n",
+        sourceType: "local_path",
+        sourceLocator: selectedDir,
+        trustLevel: "markdown_only",
+        compatibility: "compatible",
+        fileInventory: [{ path: "SKILL.md", kind: "skill" }],
+        metadata: { sourceKind: "local_path" },
+      },
+      {
+        id: excludedId,
+        companyId,
+        key: `company/${companyId}/excluded-skill`,
+        slug: "excluded-skill",
+        name: "Excluded Skill",
+        markdown: "# Excluded Skill\n",
+        sourceType: "local_path",
+        sourceLocator: excludedDir,
+        trustLevel: "markdown_only",
+        compatibility: "compatible",
+        fileInventory: [{ path: "SKILL.md", kind: "skill" }],
+        metadata: { sourceKind: "local_path" },
+      },
+    ]);
+
+    const entries = await svc.listRuntimeSkillEntries(companyId, {
+      materializeMissing: false,
+      skillKeys: ["selected-skill"],
+    });
+
+    expect(entries.map((entry) => entry.key)).toEqual([
+      `company/${companyId}/selected-skill`,
+    ]);
+  });
+
   it("materializes source-missing company skills from the stored markdown during runtime listing", async () => {
     const companyId = randomUUID();
     const skillId = randomUUID();
