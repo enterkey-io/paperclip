@@ -20,6 +20,7 @@ import cliEsbuildConfig from "../cli/esbuild.config.mjs";
 import { bundledCliNpmDependencies } from "./cli-bundled-npm-dependencies.mjs";
 import {
   createBundledInstallManifest,
+  loadWorkspacePackageVersions,
   materializePublishManifest,
   selectBundledDependencyPatches,
 } from "./prepare-bundled-package.mjs";
@@ -36,6 +37,9 @@ const serverPackage = JSON.parse(
 );
 const dbPackage = JSON.parse(
   await readFile(new URL("../packages/db/package.json", import.meta.url), "utf8"),
+);
+const pluginSdkPackage = JSON.parse(
+  await readFile(new URL("../packages/plugins/sdk/package.json", import.meta.url), "utf8"),
 );
 const releaseScript = await readFile(new URL("./release.sh", import.meta.url), "utf8");
 const releaseLib = await readFile(new URL("./release-lib.sh", import.meta.url), "utf8");
@@ -173,6 +177,30 @@ test("bundled package staging materializes workspace dependency versions", () =>
     caret: "^2026.723.0",
     tilde: "~2026.723.0",
   });
+});
+
+test("bundled package staging resolves mixed workspace package versions", () => {
+  const workspaceVersions = loadWorkspacePackageVersions();
+  const staged = materializePublishManifest(serverPackage, workspaceVersions);
+
+  assert.notEqual(serverPackage.version, pluginSdkPackage.version);
+  assert.equal(staged.dependencies["@paperclipai/shared"], serverPackage.version);
+  assert.equal(staged.dependencies["@paperclipai/plugin-sdk"], pluginSdkPackage.version);
+});
+
+test("bundled package staging rejects unresolved workspace dependencies", () => {
+  assert.throws(
+    () =>
+      materializePublishManifest(
+        {
+          name: "@paperclipai/example",
+          version: "0.3.1",
+          dependencies: { "@paperclipai/missing": "workspace:*" },
+        },
+        new Map(),
+      ),
+    /Cannot resolve workspace dependency @paperclipai\/missing for @paperclipai\/example/,
+  );
 });
 
 test("bundled package staging installs only dependencies included in the tarball", () => {

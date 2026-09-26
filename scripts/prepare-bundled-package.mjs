@@ -7,7 +7,37 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
-export function materializePublishManifest(pkg) {
+export function loadWorkspacePackageVersions(sourceRoot = repoRoot) {
+  const manifestPath = resolve(sourceRoot, "scripts", "release-package-manifest.json");
+  const entries = JSON.parse(readFileSync(manifestPath, "utf8"));
+  if (!Array.isArray(entries)) {
+    throw new Error(`${manifestPath} must contain an array`);
+  }
+
+  const versions = new Map();
+  for (const [index, entry] of entries.entries()) {
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      typeof entry.dir !== "string" ||
+      typeof entry.name !== "string"
+    ) {
+      throw new Error(`${manifestPath} entry ${index + 1} must declare string dir and name fields`);
+    }
+    const packagePath = resolve(sourceRoot, entry.dir, "package.json");
+    const workspacePackage = JSON.parse(readFileSync(packagePath, "utf8"));
+    if (workspacePackage.name !== entry.name || typeof workspacePackage.version !== "string") {
+      throw new Error(`${packagePath} must declare ${entry.name} with a string version`);
+    }
+    if (versions.has(entry.name)) {
+      throw new Error(`${manifestPath} declares duplicate package ${entry.name}`);
+    }
+    versions.set(entry.name, workspacePackage.version);
+  }
+  return versions;
+}
+
+export function materializePublishManifest(pkg, workspaceVersions) {
   const publishConfig = pkg.publishConfig ?? {};
   const publishManifest = { ...pkg };
 
@@ -21,8 +51,13 @@ export function materializePublishManifest(pkg) {
       Object.entries(publishManifest[section]).map(([name, specifier]) => {
         if (typeof specifier !== "string" || !specifier.startsWith("workspace:")) return [name, specifier];
         const range = specifier.slice("workspace:".length);
+        const version = workspaceVersions?.get(name) ?? (workspaceVersions ? undefined : pkg.version);
+        if (typeof version !== "string" || version.length === 0) {
+          throw new Error(`Cannot resolve workspace dependency ${name} for ${pkg.name}`);
+        }
+        if (range !== "*" && range !== "^" && range !== "~") return [name, range];
         const prefix = range === "^" || range === "~" ? range : "";
-        return [name, `${prefix}${pkg.version}`];
+        return [name, `${prefix}${version}`];
       }),
     );
   }
@@ -156,7 +191,8 @@ export function prepareBundledPackage(sourceDir, destinationDir, { sourceRoot = 
   }
 
   const deployedPackagePath = resolve(destinationDir, "package.json");
-  const publishManifest = materializePublishManifest(sourcePackage);
+  const workspaceVersions = loadWorkspacePackageVersions(sourceRoot);
+  const publishManifest = materializePublishManifest(sourcePackage, workspaceVersions);
   const installManifest = createBundledInstallManifest(publishManifest, bundledDependencies);
   writeFileSync(deployedPackagePath, `${JSON.stringify(installManifest, null, 2)}\n`);
 
